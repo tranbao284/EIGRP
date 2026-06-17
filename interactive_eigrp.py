@@ -23,6 +23,8 @@ class InteractiveEIGRP:
         self.topology_table = {self.local_net: {self.router_name: {"RD": 0, "FD": 0}}}
         self.routing_table = {self.local_net: {"metric": 0, "next_hop": "Direct"}}
         
+        self.blocked_neighbors = set()
+        
         self.lock = threading.Lock()
         self.setup_sockets()
 
@@ -75,15 +77,46 @@ class InteractiveEIGRP:
         except ValueError:
             print("[LOI] Vui long nhap so nguyen hop le!")
 
+    def toggle_link(self):
+        print("\n--- QUAN LY LINK (CAP) ---")
+        print(f" Lang gieng hien tai: {list(self.neighbors.keys())}")
+        print(f" Cap dang bi rut: {list(self.blocked_neighbors)}")
+        
+        target_input = input("Nhap ten Router muon ngat/ket noi lai (VD: R1 R2): ").strip()
+        if not target_input: return
+        
+        targets = target_input.replace(',', ' ').split()
+        
+        with self.lock:
+            for target in targets:
+                if target in self.blocked_neighbors:
+                    self.blocked_neighbors.remove(target)
+                    print(f"[!] Da CAM LAI cap voi {target}.")
+                else:
+                    self.blocked_neighbors.add(target)
+                    print(f"[!] Da RUT CAP noi voi {target}.")
+        print(f"[i] Vui long cho {HOLD_TIME}s de mang tu dong hoi tu...")
+
     def send_hello(self):
         while True:
-            payload = {"type": "HELLO", "router_name": self.router_name}
+            # [FIX 2 CHIỀU] Gửi kèm danh sách đen để báo cho láng giềng biết mình đã cự tuyệt họ
+            payload = {
+                "type": "HELLO", 
+                "router_name": self.router_name,
+                "blocked": list(self.blocked_neighbors)
+            }
             self.send_sock.sendto(json.dumps(payload).encode(), ('<broadcast>', PORT))
             time.sleep(HELLO_INTERVAL)
 
     def trigger_update(self):
         with self.lock:
-            payload = {"type": "UPDATE", "router_name": self.router_name, "routes": self.routing_table}
+            # [FIX 2 CHIỀU] Update cũng phải kèm danh sách đen
+            payload = {
+                "type": "UPDATE", 
+                "router_name": self.router_name, 
+                "routes": self.routing_table,
+                "blocked": list(self.blocked_neighbors)
+            }
         self.send_sock.sendto(json.dumps(payload).encode(), ('<broadcast>', PORT))
 
     def listener(self):
@@ -93,7 +126,15 @@ class InteractiveEIGRP:
                 msg = json.loads(data.decode())
                 sender = msg["router_name"]
                 
-                if sender == self.router_name: continue
+                # 1. Bỏ qua gói tin của chính mình
+                if sender == self.router_name: 
+                    continue
+                # 2. Bỏ qua gói tin nếu MÌNH ĐÃ CHẶN thằng gửi
+                if sender in self.blocked_neighbors:
+                    continue
+                # 3. [FIX 2 CHIỀU] Bỏ qua gói tin nếu THẰNG GỬI ĐÃ CHẶN MÌNH
+                if self.router_name in msg.get("blocked", []):
+                    continue
                 
                 with self.lock:
                     if msg["type"] == "HELLO":
@@ -141,7 +182,10 @@ class InteractiveEIGRP:
             best_neighbor = min(paths, key=lambda k: paths[k]["FD"])
             best_fd = paths[best_neighbor]["FD"]
             
-            if net not in self.routing_table or self.routing_table[net]["metric"] != best_fd:
+            if (net not in self.routing_table or 
+                self.routing_table[net]["metric"] != best_fd or
+                self.routing_table[net]["next_hop"] != best_neighbor):
+                
                 self.routing_table[net] = {"metric": best_fd, "next_hop": best_neighbor}
                 route_changed = True
 
@@ -171,7 +215,8 @@ class InteractiveEIGRP:
         print(" 2. Xem Bang Cau Truc Mang (Topology Table - DUAL)")
         print(" 3. Xem Bang Dinh Tuyen (Routing Table)")
         print(" 4. Thay doi thong so (BW, Delay, Load, Rel)")
-        print(" 0. Tat Router")
+        print(" 5. Ngat hoac Ket noi lai Link voi lang gieng")
+        print(" 0. Tat Nguon Router")
         print("=======================================================")
 
     def interactive_loop(self):
@@ -181,7 +226,7 @@ class InteractiveEIGRP:
         
         while True:
             self.print_menu()
-            choice = input("Chon chuc nang (0-4): ")
+            choice = input("Chon chuc nang (0-5): ")
             
             with self.lock:
                 if choice == '1':
@@ -221,11 +266,14 @@ class InteractiveEIGRP:
             
             if choice == '4':
                 self.change_parameters()
+            elif choice == '5':
+                self.toggle_link()
             elif choice == '0':
                 print("[!] Tat nguon Router...")
                 sys.exit(0)
             
-            input("\nNhan Enter de tiep tuc...")
+            if choice != '5': 
+                input("\nNhan Enter de tiep tuc...")
 
 if __name__ == "__main__":
     try:
